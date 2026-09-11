@@ -1,0 +1,97 @@
+name: "ViT VAE Benchmark"
+
+on:
+  workflow_dispatch:
+    inputs:
+      job_id:
+        description: "Benchmark Run Identifier"
+        required: true
+        default: "benchmark_sample"
+      dtype:
+        description: "Execution Precision"
+        required: true
+        default: "float32"
+        type: choice
+        options:
+          - "float32"
+          - "bfloat16"
+      tile_config:
+        description: "Spatial Tiling Strategy"
+        required: true
+        default: "no_tile"
+        type: choice
+        options:
+          - "no_tile"
+          - "single_tile"
+          - "fast_512"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.job_id }}
+  cancel-in-progress: false
+
+jobs:
+  benchmark:
+    name: "CPU ViT Evaluation"
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    env:
+      PYTHONUNBUFFERED: "1"
+      RCLONE_CONFIG_REMOTE_TYPE: "b2"
+      RCLONE_CONFIG_REMOTE_ACCOUNT: ${{ secrets.STORAGE_ACCOUNT || secrets.B2_KEY_ID }}
+      RCLONE_CONFIG_REMOTE_KEY: ${{ secrets.STORAGE_KEY || secrets.B2_APP_KEY || secrets.BS_APP_KEY }}
+      RCLONE_CONFIG_DATA_TYPE: "crypt"
+      RCLONE_CONFIG_DATA_REMOTE: "remote:${{ secrets.STORAGE_BUCKET || secrets.B2_BUCKET }}/inbox"
+      RCLONE_CONFIG_DATA_PASSWORD: ${{ secrets.STORAGE_SECRET || secrets.CRYPT_PASS }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ffmpeg rclone
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install Python packages
+        run: |
+          python -m pip install --upgrade pip
+          pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+          pip install -r requirements.txt
+
+      - name: Fetch evaluation dataset
+        run: |
+          JOB="${{ inputs.job_id }}"
+          if [[ "$JOB" =~ ^https?:// ]]; then
+            curl -sSL -o "./input.safetensors" "$JOB"
+          else
+            rclone copy "data:latents/${JOB}.safetensors" ./input.safetensors 2>/dev/null || \
+            rclone copy "data:latents/${JOB}" ./input.safetensors
+          fi
+          ls -lh ./input.safetensors
+
+      - name: Execute ViT VAE benchmark
+        run: |
+          TILE_ARGS="--no-tile"
+          if [ "${{ inputs.tile_config }}" = "fast_512" ]; then
+            TILE_ARGS="--tile-size 512 512"
+          elif [ "${{ inputs.tile_config }}" = "single_tile" ]; then
+            TILE_ARGS="--tile-size 544 960"
+          fi
+
+          python run_benchmark.py "./input.safetensors" \
+            --dtype "${{ inputs.dtype }}" \
+            --output "./output.mp4" \
+            $TILE_ARGS
+
+      - name: Sync benchmark artifacts
+        run: |
+          JOB="${{ inputs.job_id }}"
+          CLEAN_ID=$(basename "$JOB" | sed 's/\.safetensors$//')
+          rclone copy ./output.mp4 "data:${CLEAN_ID}.mp4"

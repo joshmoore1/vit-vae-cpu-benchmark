@@ -1,0 +1,24 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Data & media files
+*.safetensors
+*.pt
+*.bin
+*.mp4
+*.avi
+*.mkv
+*.wav
+
+# Local directories
+staging/
+output/
+data/
+
+# Local configuration & scripts
+*.conf
+.env*
+.DS_Store
+submit_latent.py
