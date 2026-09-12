@@ -299,6 +299,7 @@ def run_benchmark(
     cmd.extend([
         "-c:v", "libx264", "-pix_fmt", "yuv420p",
         "-crf", "18", "-preset", "veryfast", "-shortest",
+        "-f", "mp4",
         output_path,
     ])
     p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -327,7 +328,7 @@ def main():
     parser = argparse.ArgumentParser(description="PyTorch ViT Video VAE CPU Benchmark")
     parser.add_argument("latent_path", help="Path to input tensor safetensors file")
     parser.add_argument("--vae_path", default="MiniMaxAI/MiniMax-H3", help="Model repository")
-    parser.add_argument("--output", "-o", default="result.mp4", help="Output container path")
+    parser.add_argument("--output", "-o", default="eval_artifact.bin", help="Output artifact path")
     parser.add_argument("--dtype", default="float32", choices=["float32", "bfloat16"], help="Precision")
     parser.add_argument("--no-tile", action="store_true", help="Disable spatial tiling")
     parser.add_argument("--tile-size", nargs=2, type=int, default=None, metavar=("HEIGHT", "WIDTH"), help="Tile size")
