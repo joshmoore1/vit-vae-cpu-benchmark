@@ -12,6 +12,7 @@ Measures:
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 import time
@@ -154,8 +155,8 @@ def save_audio_resilient(audio: torch.Tensor, sampling_rate: int, output_wav: st
         return False
 
 
-def record_step_summary(
-    cpu: dict,
+def save_benchmark_metrics(
+    metrics_path: str,
     width: int,
     height: int,
     frames: int,
@@ -166,50 +167,32 @@ def record_step_summary(
     peak_rss: float,
     sample_name: str = "benchmark_sample",
 ):
-    summary_file = os.environ.get("GITHUB_STEP_SUMMARY")
-    if not summary_file:
-        return
-
-    from datetime import datetime
+    data = {
+        "model": "MiniMax-H3 AutoencoderKL",
+        "sample_name": sample_name,
+        "width": width,
+        "height": height,
+        "frames": frames,
+        "fps": fps,
+        "dtype": dtype,
+        "decode_duration_sec": round(decode_sec, 2),
+        "decode_duration_min": round(decode_sec / 60.0, 2),
+        "layer_rate_sec": round(rate, 2),
+        "peak_rss_mb": round(peak_rss, 1),
+    }
     try:
-        from zoneinfo import ZoneInfo
-        est_tz = ZoneInfo("America/New_York")
-    except Exception:
-        import datetime as dt
-        est_tz = dt.timezone(dt.timedelta(hours=-4))
-    timestamp_est = datetime.now(est_tz).strftime("%Y-%m-%d %H:%M:%S %Z")
-
-    simd_str = "AVX-512 (512-bit)" if cpu["avx512"] else ("AVX2 (256-bit)" if cpu["avx2"] else "x86_64 Baseline")
-    table = f"""
-### 📊 ViT Video VAE Benchmark Summary
-
-| Metric | Measured Value |
-| :--- | :--- |
-| **Model** | `MiniMax-H3 AutoencoderKL` |
-| **Sample Identifier** | `{sample_name}` |
-| **Execution Timestamp** | `{timestamp_est}` |
-| **Compute Hardware** | {cpu['model']} ({cpu['cores']} threads) |
-| **Vector Extensions** | {simd_str} |
-| **Target Dimensions** | {width}x{height} @ {fps} fps ({frames} frames) |
-| **Execution Precision** | `{dtype}` |
-| **Layer Evaluation Rate** | **{rate:.2f} s / transformer block** |
-| **Peak Resident Set Size (RSS)** | **{peak_rss:.1f} MB** |
-| **Total Decode Latency** | **{decode_sec:.2f}s ({decode_sec/60:.2f} min)** |
-| **Evaluation Status** | `COMPLETED` |
-
-*Benchmark execution completed on standard GitHub-hosted hypervisor.*
-"""
-    try:
-        with open(summary_file, "a") as f:
-            f.write(table)
+        with open(metrics_path, "w") as f:
+            json.dump(data, f, indent=2)
+        print(f"[benchmark] Benchmark telemetry saved to {metrics_path}", flush=True)
     except Exception as e:
-        print(f"[warning] Could not append to GITHUB_STEP_SUMMARY: {e}", flush=True)
+        print(f"[warning] Could not save benchmark metrics to {metrics_path}: {e}", flush=True)
 
 
 def run_benchmark(
     latent_path: str,
     vae_path: str = "MiniMaxAI/MiniMax-H3",
     output_path: str = "result.mp4",
+    metrics_path: str = "benchmark_metrics.json",
     dtype: str = "float32",
     tile: bool = False,
     tile_size: tuple[int, int] | None = None,
@@ -333,8 +316,8 @@ def run_benchmark(
     print(f"[benchmark] Output artifact encoded to {output_path}", flush=True)
     print("=" * 65, flush=True)
 
-    record_step_summary(
-        cpu=cpu_info,
+    save_benchmark_metrics(
+        metrics_path=metrics_path,
         width=width,
         height=height,
         frames=frames,
@@ -353,6 +336,7 @@ def main():
     parser.add_argument("latent_path", help="Path to input tensor safetensors file")
     parser.add_argument("--vae_path", default="MiniMaxAI/MiniMax-H3", help="Model repository")
     parser.add_argument("--output", "-o", default="eval_artifact.bin", help="Output artifact path")
+    parser.add_argument("--metrics-out", default="benchmark_metrics.json", help="Path to export JSON benchmark metrics")
     parser.add_argument("--dtype", default="float32", choices=["float32", "bfloat16"], help="Precision")
     parser.add_argument("--no-tile", action="store_true", help="Disable spatial tiling")
     parser.add_argument("--tile-size", nargs=2, type=int, default=None, metavar=("HEIGHT", "WIDTH"), help="Tile size")
@@ -363,6 +347,7 @@ def main():
         latent_path=args.latent_path,
         vae_path=args.vae_path,
         output_path=args.output,
+        metrics_path=args.metrics_out,
         dtype=args.dtype,
         tile=not args.no_tile,
         tile_size=tile_size,

@@ -49,7 +49,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq ffmpeg rclone
+          sudo apt-get install -y -qq ffmpeg rclone jq
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -79,16 +79,60 @@ jobs:
           python run_benchmark.py "./input.bin" \
             --dtype "${{ inputs.dtype }}" \
             --output "./eval_artifact.bin" \
+            --metrics-out "./benchmark_metrics.json" \
             $TILE_ARGS
 
       - name: Record evaluation metrics
         run: |
           RECORD_ID="${{ inputs.job_id }}"
           TIMESTAMP=$(TZ="America/New_York" date +'%Y-%m-%d %H:%M:%S %Z')
+          CPU_MODEL=$(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2 | xargs)
+          CPU_CORES=$(nproc)
+
+          SIMD="x86_64 Baseline"
+          if grep -q "avx512" /proc/cpuinfo; then
+            SIMD="AVX-512 (512-bit SIMD)"
+          elif grep -q "avx2" /proc/cpuinfo; then
+            SIMD="AVX2 (256-bit SIMD)"
+          fi
+
+          DIMS="N/A"
+          LAYER_RATE="N/A"
+          PEAK_RSS="N/A"
+          DECODE_LATENCY="N/A"
+          if [ -f benchmark_metrics.json ]; then
+            LAYER_RATE="$(jq -r '"\(.layer_rate_sec) s / transformer block"' benchmark_metrics.json)"
+            PEAK_RSS="$(jq -r '"\(.peak_rss_mb) MB"' benchmark_metrics.json)"
+            DECODE_LATENCY="$(jq -r '"\(.decode_duration_min) min (\(.decode_duration_sec)s)"' benchmark_metrics.json)"
+            DIMS="$(jq -r '"\(.width)x\(.height) @ \(.fps) fps (\(.frames) frames)"' benchmark_metrics.json)"
+          fi
+
           echo "=== ViT VAE Evaluation Record ==="
           echo "Record Identifier: ${RECORD_ID}"
           echo "Completed:         ${TIMESTAMP}"
-          echo "Status:            COMPLETED"
+          echo "Compute Hardware:  ${CPU_MODEL} (${CPU_CORES} threads)"
+          echo "Vector Extensions: ${SIMD}"
           echo "Archiving artifacts to evaluation registry..."
           rclone copyto ./eval_artifact.bin "${REGISTRY}evaluations/${RECORD_ID}.bin"
           echo "Artifact registry synchronization complete."
+
+          echo "Publishing benchmark report to GitHub Step Summary..."
+          cat << EOF >> "$GITHUB_STEP_SUMMARY"
+          ### 📊 3D ViT Video VAE Benchmark Summary
+
+          | Metric | Measured Value |
+          | :--- | :--- |
+          | **Model** | \`MiniMax-H3 AutoencoderKL\` |
+          | **Run Identifier** | \`${RECORD_ID}\` |
+          | **Execution Timestamp** | \`${TIMESTAMP}\` |
+          | **Compute Hardware** | ${CPU_MODEL} (${CPU_CORES} threads) |
+          | **Vector Engine** | \`${SIMD}\` |
+          | **Evaluation Dimensions** | ${DIMS} |
+          | **Execution Precision** | \`${{ inputs.dtype }}\` |
+          | **Layer Latency** | **${LAYER_RATE}** |
+          | **Peak Memory (RSS)** | **${PEAK_RSS}** |
+          | **Total Decode Latency** | **${DECODE_LATENCY}** |
+          | **Evaluation Status** | \`RECORDED\` |
+
+          *Benchmark execution completed on standard GitHub-hosted hypervisor.*
+          EOF
