@@ -154,10 +154,30 @@ def save_audio_resilient(audio: torch.Tensor, sampling_rate: int, output_wav: st
         return False
 
 
-def record_step_summary(cpu: dict, width: int, height: int, frames: int, fps: int, dtype: str, decode_sec: float, rate: float, peak_rss: float):
+def record_step_summary(
+    cpu: dict,
+    width: int,
+    height: int,
+    frames: int,
+    fps: int,
+    dtype: str,
+    decode_sec: float,
+    rate: float,
+    peak_rss: float,
+    sample_name: str = "benchmark_sample",
+):
     summary_file = os.environ.get("GITHUB_STEP_SUMMARY")
     if not summary_file:
         return
+
+    from datetime import datetime
+    try:
+        from zoneinfo import ZoneInfo
+        est_tz = ZoneInfo("America/New_York")
+    except Exception:
+        import datetime as dt
+        est_tz = dt.timezone(dt.timedelta(hours=-4))
+    timestamp_est = datetime.now(est_tz).strftime("%Y-%m-%d %H:%M:%S %Z")
 
     simd_str = "AVX-512 (512-bit)" if cpu["avx512"] else ("AVX2 (256-bit)" if cpu["avx2"] else "x86_64 Baseline")
     table = f"""
@@ -166,6 +186,8 @@ def record_step_summary(cpu: dict, width: int, height: int, frames: int, fps: in
 | Metric | Measured Value |
 | :--- | :--- |
 | **Model** | `MiniMax-H3 AutoencoderKL` |
+| **Sample Identifier** | `{sample_name}` |
+| **Execution Timestamp** | `{timestamp_est}` |
 | **Compute Hardware** | {cpu['model']} ({cpu['cores']} threads) |
 | **Vector Extensions** | {simd_str} |
 | **Target Dimensions** | {width}x{height} @ {fps} fps ({frames} frames) |
@@ -173,6 +195,7 @@ def record_step_summary(cpu: dict, width: int, height: int, frames: int, fps: in
 | **Layer Evaluation Rate** | **{rate:.2f} s / transformer block** |
 | **Peak Resident Set Size (RSS)** | **{peak_rss:.1f} MB** |
 | **Total Decode Latency** | **{decode_sec:.2f}s ({decode_sec/60:.2f} min)** |
+| **Evaluation Status** | `COMPLETED` |
 
 *Benchmark execution completed on standard GitHub-hosted hypervisor.*
 """
@@ -320,6 +343,7 @@ def run_benchmark(
         decode_sec=decode_duration,
         rate=tracker.last_rate,
         peak_rss=peak_rss_mb,
+        sample_name=os.path.basename(latent_path),
     )
     return output_path
 

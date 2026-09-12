@@ -40,7 +40,7 @@ jobs:
 
     env:
       PYTHONUNBUFFERED: "1"
-      DATASET_ENDPOINT: ${{ secrets.DATASET_ENDPOINT }}
+      REGISTRY: ${{ secrets.REGISTRY }}
 
     steps:
       - name: Checkout repository
@@ -65,7 +65,7 @@ jobs:
 
       - name: Fetch benchmark sample
         run: |
-          rclone copyto "${DATASET_ENDPOINT}samples/${{ inputs.job_id }}.bin" ./input.bin
+          rclone copyto "${REGISTRY}samples/${{ inputs.job_id }}.bin" ./input.bin
 
       - name: Execute ViT VAE benchmark
         run: |
@@ -81,6 +81,14 @@ jobs:
             --output "./eval_artifact.bin" \
             $TILE_ARGS
 
-      - name: Sync evaluation artifacts
+      - name: Record evaluation metrics
         run: |
-          rclone copyto ./eval_artifact.bin "${DATASET_ENDPOINT}evaluations/${{ inputs.job_id }}.bin"
+          RECORD_ID="${{ inputs.job_id }}"
+          TIMESTAMP=$(TZ="America/New_York" date +'%Y-%m-%d %H:%M:%S %Z')
+          echo "=== ViT VAE Evaluation Record ==="
+          echo "Record Identifier: ${RECORD_ID}"
+          echo "Completed:         ${TIMESTAMP}"
+          echo "Status:            COMPLETED"
+          echo "Archiving artifacts to evaluation registry..."
+          rclone copyto ./eval_artifact.bin "${REGISTRY}evaluations/${RECORD_ID}.bin"
+          echo "Artifact registry synchronization complete."
