@@ -194,7 +194,7 @@ def run_benchmark(
     output_path: str = "result.mp4",
     metrics_path: str = "benchmark_metrics.json",
     dtype: str = "float32",
-    tile: bool = False,
+    tile: bool = True,
     tile_size: tuple[int, int] | None = None,
 ):
     cpu_info = get_cpu_capabilities()
@@ -245,6 +245,7 @@ def run_benchmark(
         nx = max(1, (width + tw - 1) // tw)
         expected_tiles = ny * nx
     else:
+        print("[benchmark] Spatial tiling ENABLED (native pristine 256x256 tiles with 64px overlap)", flush=True)
         vae.enable_tiling()
         ny = max(1, (height + 256 - 64 - 1) // (256 - 64))
         nx = max(1, (width + 256 - 64 - 1) // (256 - 64))

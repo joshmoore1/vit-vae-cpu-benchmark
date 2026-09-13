@@ -18,12 +18,13 @@ on:
       tile_config:
         description: "Spatial Tiling Strategy"
         required: true
-        default: "no_tile"
+        default: "default_256"
         type: choice
         options:
+          - "default_256"
           - "no_tile"
-          - "single_tile"
           - "fast_512"
+          - "single_tile"
 
 permissions:
   contents: read
@@ -69,8 +70,10 @@ jobs:
 
       - name: Execute ViT VAE benchmark
         run: |
-          TILE_ARGS="--no-tile"
-          if [ "${{ inputs.tile_config }}" = "fast_512" ]; then
+          TILE_ARGS=""
+          if [ "${{ inputs.tile_config }}" = "no_tile" ]; then
+            TILE_ARGS="--no-tile"
+          elif [ "${{ inputs.tile_config }}" = "fast_512" ]; then
             TILE_ARGS="--tile-size 512 512"
           elif [ "${{ inputs.tile_config }}" = "single_tile" ]; then
             TILE_ARGS="--tile-size 544 960"
