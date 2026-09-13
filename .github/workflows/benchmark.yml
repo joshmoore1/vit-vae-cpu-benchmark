@@ -15,16 +15,6 @@ on:
         options:
           - "float32"
           - "bfloat16"
-      tile_config:
-        description: "Spatial Tiling Strategy"
-        required: true
-        default: "default_256"
-        type: choice
-        options:
-          - "default_256"
-          - "no_tile"
-          - "fast_512"
-          - "single_tile"
 
 permissions:
   contents: read
@@ -70,20 +60,10 @@ jobs:
 
       - name: Execute ViT VAE benchmark
         run: |
-          TILE_ARGS=""
-          if [ "${{ inputs.tile_config }}" = "no_tile" ]; then
-            TILE_ARGS="--no-tile"
-          elif [ "${{ inputs.tile_config }}" = "fast_512" ]; then
-            TILE_ARGS="--tile-size 512 512"
-          elif [ "${{ inputs.tile_config }}" = "single_tile" ]; then
-            TILE_ARGS="--tile-size 544 960"
-          fi
-
           python run_benchmark.py "./input.bin" \
             --dtype "${{ inputs.dtype }}" \
             --output "./eval_artifact.bin" \
-            --metrics-out "./benchmark_metrics.json" \
-            $TILE_ARGS
+            --metrics-out "./benchmark_metrics.json"
 
       - name: Record evaluation metrics
         run: |
