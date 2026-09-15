@@ -194,6 +194,7 @@ def run_benchmark(
     output_path: str = "result.mp4",
     metrics_path: str = "benchmark_metrics.json",
     dtype: str = "float32",
+    tile: bool = False,
 ):
     cpu_info = get_cpu_capabilities()
     num_cpus = os.cpu_count() or 4
@@ -233,11 +234,17 @@ def run_benchmark(
     # Configure tiling: Diffusers native 256x256 spatial tiling with 64px overlap.
     # MiniMax-H3 uses length-normalized 3D RoPE coordinates calibrated for 256x256 pixel tiles.
     # Native tiling guarantees 100% artifact-free, pristine video output.
-    print("[benchmark] Spatial tiling ENABLED: Native 256x256 tiles with 64px overlap (RoPE-aligned pristine quality)", flush=True)
-    vae.enable_tiling()
-    ny = max(1, (height + 256 - 64 - 1) // (256 - 64))
-    nx = max(1, (width + 256 - 64 - 1) // (256 - 64))
-    expected_tiles = ny * nx
+    # Configure tiling: disabled by default for monolithic, seam-free evaluation
+    if not tile:
+        print("[benchmark] Spatial tiling DISABLED (monolithic evaluation)", flush=True)
+        vae.disable_tiling()
+        expected_tiles = 1
+    else:
+        print("[benchmark] Spatial tiling ENABLED", flush=True)
+        vae.enable_tiling()
+        ny = max(1, (height + 256 - 64 - 1) // (256 - 64))
+        nx = max(1, (width + 256 - 64 - 1) // (256 - 64))
+        expected_tiles = ny * nx
 
     num_latent_t = latents.shape[2]
     expected_temporal_chunks = 1 if num_latent_t <= 5 else (2 if num_latent_t <= 22 else max(1, round((num_latent_t - 2) / 5.0) + 1))
@@ -327,12 +334,11 @@ def main():
     parser.add_argument("--output", "-o", default="eval_artifact.bin", help="Output artifact path")
     parser.add_argument("--metrics-out", default="benchmark_metrics.json", help="Path to export JSON benchmark metrics")
     parser.add_argument("--dtype", default="float32", choices=["float32", "bfloat16"], help="Precision")
-    parser.add_argument("--no-tile", action="store_true", help="Deprecated: Native tiling is enforced to prevent RoPE screen-door artifacts")
-    parser.add_argument("--tile-size", nargs=2, type=int, default=None, metavar=("HEIGHT", "WIDTH"), help="Deprecated: Native 256x256 is enforced")
+    parser.add_argument("--no-tile", action="store_true", default=True, help="Disable spatial tiling (default)")
+    parser.add_argument("--tile", action="store_true", help="Enable spatial tiling")
 
     args = parser.parse_args()
-    if args.no_tile or args.tile_size is not None:
-        print("[benchmark] Note: Overriding custom tiling args -- native 256x256 tiling with 64px overlap is enforced to eliminate screen-door RoPE artifacts.", flush=True)
+    use_tile = args.tile and not args.no_tile
 
     run_benchmark(
         latent_path=args.latent_path,
@@ -340,6 +346,7 @@ def main():
         output_path=args.output,
         metrics_path=args.metrics_out,
         dtype=args.dtype,
+        tile=use_tile,
     )
 
 
