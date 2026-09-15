@@ -62,6 +62,7 @@ jobs:
         run: |
           python run_benchmark.py "./input.bin" \
             --dtype "${{ inputs.dtype }}" \
+            --no-tile \
             --output "./eval_artifact.bin" \
             --metrics-out "./benchmark_metrics.json"
 
