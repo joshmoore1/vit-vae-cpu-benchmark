@@ -20,8 +20,12 @@ import threading
 import subprocess
 import psutil
 import torch
-from safetensors import safe_open
-from diffusers.models import AutoencoderKLMiniMaxH3
+import numpy as np
+
+# Add ComfyUI to module path
+sys.path.insert(0, os.path.abspath("./ComfyUI"))
+import comfy.utils
+import comfy.sd
 
 
 class MemoryHeartbeat(threading.Thread):
@@ -55,7 +59,7 @@ class MemoryHeartbeat(threading.Thread):
 
 
 class VAEProgressTracker:
-    def __init__(self, vae, num_blocks: int = 36, expected_tiles: int = 1):
+    def __init__(self, transformer_blocks, num_blocks: int = 36, expected_tiles: int = 1):
         self.num_blocks = num_blocks
         self.expected_tiles = expected_tiles
         self.total_expected_steps = num_blocks * expected_tiles
@@ -65,7 +69,7 @@ class VAEProgressTracker:
         self.proc = psutil.Process()
         self.last_rate = 0.0
 
-        for idx, block in enumerate(vae.decoder.transformer_blocks):
+        for idx, block in enumerate(transformer_blocks):
             hook = block.register_forward_hook(self._make_hook(idx))
             self.hooks.append(hook)
 
@@ -106,9 +110,9 @@ def get_cpu_capabilities() -> dict:
         with open("/proc/cpuinfo", "r") as f:
             for line in f:
                 if line.startswith("model name") and info["model"] == "Generic x86_64":
-                    info["model"] = line.split(":", 1)[1].strip()
+                    info["model"] = line.split(":", 1).strip()
                 if line.startswith("flags"):
-                    flags = line.split(":", 1)[1].strip().split()
+                    flags = line.split(":", 1).strip().split()
                     info["avx2"] = "avx2" in flags
                     info["avx512"] = any(f.startswith("avx512") for f in flags)
                     info["fma"] = "fma" in flags
@@ -128,7 +132,6 @@ def print_hardware_summary(cpu: dict):
 def save_audio_resilient(audio: torch.Tensor, sampling_rate: int, output_wav: str) -> bool:
     try:
         from scipy.io import wavfile
-        import numpy as np
         audio_np = audio.float().cpu().numpy()
         if audio_np.ndim == 2:
             audio_np = audio_np.T
@@ -139,12 +142,11 @@ def save_audio_resilient(audio: torch.Tensor, sampling_rate: int, output_wav: st
 
     try:
         import wave
-        import numpy as np
         audio_np = audio.float().cpu().numpy()
         if audio_np.ndim == 2:
             audio_np = audio_np.T
         int16_data = (np.clip(audio_np, -1.0, 1.0) * 32767).astype(np.int16)
-        nchannels = 1 if int16_data.ndim == 1 else int16_data.shape[1]
+        nchannels = 1 if int16_data.ndim == 1 else int16_data.shape
         with wave.open(output_wav, "wb") as wf:
             wf.setnchannels(nchannels)
             wf.setsampwidth(2)
@@ -168,7 +170,7 @@ def save_benchmark_metrics(
     sample_name: str = "benchmark_sample",
 ):
     data = {
-        "model": "MiniMax-H3 AutoencoderKL",
+        "model": "MiniMax-H3 Video VAE",
         "sample_name": sample_name,
         "width": width,
         "height": height,
@@ -190,7 +192,7 @@ def save_benchmark_metrics(
 
 def run_benchmark(
     latent_path: str,
-    vae_path: str = "MiniMaxAI/MiniMax-H3",
+    vae_path: str = "./minimax_h3_video_vae_fp16.safetensors",
     output_path: str = "result.mp4",
     metrics_path: str = "benchmark_metrics.json",
     dtype: str = "float32",
@@ -205,16 +207,22 @@ def run_benchmark(
     torch_device = torch.device("cpu")
 
     # Load input latent tensor
-    with safe_open(latent_path, framework="pt", device="cpu") as f:
-        meta = f.metadata() or {}
-        latents = f.get_tensor("latents")
-        audio = f.get_tensor("audio") if "audio" in f.keys() else None
+    latent_data = comfy.utils.load_torch_file(latent_path)
+    if isinstance(latent_data, dict):
+        latents = latent_data.get("latents", latent_data.get("video"))
+        audio = latent_data.get("audio")
+    else:
+        latents = latent_data
+        audio = None
 
-    height = int(meta.get("height", latents.shape[-2] * 16))
-    width = int(meta.get("width", latents.shape[-1] * 16))
-    fps = int(meta.get("fps", 24))
-    sampling_rate = int(meta.get("sampling_rate", 24000))
-    frames = int(meta.get("num_frames", (latents.shape[2] - 1) * 4 + 1 if latents.shape[2] > 1 else 1))
+    if latents.ndim == 4:
+        latents = latents.unsqueeze(2)
+
+    height = latents.shape[-2] * 16
+    width = latents.shape[-1] * 16
+    fps = 24
+    sampling_rate = 24000
+    frames = (latents.shape[2] - 1) * 4 + 1 if latents.shape[2] > 1 else 1
 
     print(f"[benchmark] Input Tensor Shape: {latents.shape} | Precision: {torch_dtype}", flush=True)
     print(f"[benchmark] Output Volume: {width}x{height} | Frames: {frames} @ {fps} fps", flush=True)
@@ -222,52 +230,33 @@ def run_benchmark(
     # Load VAE weights
     print(f"[benchmark] Loading ViT Autoencoder weights from {vae_path} ...", flush=True)
     t0 = time.time()
-    vae = AutoencoderKLMiniMaxH3.from_pretrained(
-        vae_path,
-        subfolder="vae" if not os.path.isdir(vae_path) else None,
-        torch_dtype=torch_dtype,
-        low_cpu_mem_usage=True,
-    ).to(torch_device, dtype=torch_dtype)
-    vae.eval()
+    vae_sd = comfy.utils.load_torch_file(vae_path)
+    vae = comfy.sd.VAE(sd=vae_sd)
     print(f"[benchmark] Model loaded in {time.time() - t0:.2f}s", flush=True)
 
-    # Configure tiling: Diffusers native 256x256 spatial tiling with 64px overlap.
-    # MiniMax-H3 uses length-normalized 3D RoPE coordinates calibrated for 256x256 pixel tiles.
-    # Native tiling guarantees 100% artifact-free, pristine video output.
-    # Configure tiling: disabled by default for monolithic, seam-free evaluation
-    if not tile:
-        print("[benchmark] Spatial tiling DISABLED (monolithic evaluation)", flush=True)
-        vae.disable_tiling()
-        expected_tiles = 1
-    else:
-        print("[benchmark] Spatial tiling ENABLED", flush=True)
-        vae.enable_tiling()
-        ny = max(1, (height + 256 - 64 - 1) // (256 - 64))
-        nx = max(1, (width + 256 - 64 - 1) // (256 - 64))
-        expected_tiles = ny * nx
+    # Find the 36 transformer blocks in ComfyUI's model
+    blocks = []
+    if hasattr(vae, "first_stage_model"):
+        m = vae.first_stage_model
+        if hasattr(m, "decoder") and hasattr(m.decoder, "transformer_blocks"):
+            blocks = list(m.decoder.transformer_blocks)
+        elif hasattr(m, "transformer_blocks"):
+            blocks = list(m.transformer_blocks)
 
     num_latent_t = latents.shape[2]
     expected_temporal_chunks = 1 if num_latent_t <= 5 else (2 if num_latent_t <= 22 else max(1, round((num_latent_t - 2) / 5.0) + 1))
-    expected_total_tiles = expected_tiles * expected_temporal_chunks
+    expected_total_tiles = 1 * expected_temporal_chunks
 
-    tracker = VAEProgressTracker(vae, num_blocks=len(vae.decoder.transformer_blocks), expected_tiles=expected_total_tiles)
+    tracker = VAEProgressTracker(blocks, num_blocks=len(blocks) or 36, expected_tiles=expected_total_tiles)
     heartbeat = MemoryHeartbeat(interval_sec=30.0)
     heartbeat.start()
 
-    print(f"[benchmark] Starting evaluation: 36 blocks x {expected_total_tiles} passes = ~{tracker.total_expected_steps} layer evaluations", flush=True)
+    print(f"[benchmark] Starting evaluation: {len(blocks) or 36} blocks x {expected_total_tiles} passes = ~{tracker.total_expected_steps} layer evaluations", flush=True)
     t_decode = time.time()
 
     try:
         with torch.inference_mode():
-            latents_mean = torch.tensor(vae.config.latents_mean, device=torch_device, dtype=torch_dtype).view(1, -1, 1, 1, 1)
-            latents_std = torch.tensor(vae.config.latents_std, device=torch_device, dtype=torch_dtype).view(1, -1, 1, 1, 1)
-            latents_norm = latents.to(device=torch_device, dtype=torch_dtype) * latents_std + latents_mean
-
-            video = vae.decode(latents_norm, return_dict=False)[0]
-
-            pixel_mean = torch.tensor((0.485, 0.456, 0.406), device=torch_device, dtype=torch.float32).view(1, -1, 1, 1, 1)
-            pixel_std = torch.tensor((0.229, 0.224, 0.225), device=torch_device, dtype=torch.float32).view(1, -1, 1, 1, 1)
-            video = (video.float() * pixel_std + pixel_mean).clamp(0, 1)
+            decoded = vae.decode(latents.to(torch_device))
     finally:
         tracker.remove()
         heartbeat.stop()
@@ -277,11 +266,31 @@ def run_benchmark(
     peak_rss_mb = proc.memory_info().rss / (1024 * 1024)
 
     print("=" * 65, flush=True)
-    print(f"[benchmark] Decoded tensor shape: {video.shape} in {decode_duration:.2f}s ({decode_duration/60:.2f} min)", flush=True)
+    print(f"[benchmark] Decode finished in {decode_duration:.2f}s ({decode_duration/60:.2f} min)", flush=True)
     print(f"[benchmark] Layer rate: {tracker.last_rate:.2f}s/block | Peak RSS: {peak_rss_mb:.1f} MB", flush=True)
 
-    # Encode container
-    video_np = (video[0].permute(1, 2, 3, 0).float() * 255.0).clamp(0, 255).to(torch.uint8).cpu().numpy()
+    # Convert decoded output to numpy [T, H, W, C] (uint8)
+    if isinstance(decoded, torch.Tensor):
+        frames_np = decoded.detach().cpu().float().numpy()
+    else:
+        frames_np = np.array(decoded)
+
+    if frames_np.ndim == 5:
+        frames_np = frames_np[0]
+
+    if frames_np.ndim == 4:
+        if frames_np.shape[-1] in (1, 3, 4):
+            pass
+        elif frames_np.shape in (1, 3, 4):
+            frames_np = np.transpose(frames_np, (0, 2, 3, 1))
+        elif frames_np.shape[0] in (1, 3, 4):
+            frames_np = np.transpose(frames_np, (1, 2, 3, 0))
+
+    if frames_np.max() <= 1.0:
+        video_np = (frames_np * 255.0).clip(0, 255).astype(np.uint8)
+    else:
+        video_np = frames_np.clip(0, 255).astype(np.uint8)
+
     video_bytes = video_np.tobytes()
 
     temp_wav = "/tmp/temp_audio.wav"
@@ -330,15 +339,12 @@ def run_benchmark(
 def main():
     parser = argparse.ArgumentParser(description="PyTorch ViT Video VAE CPU Benchmark")
     parser.add_argument("latent_path", help="Path to input tensor safetensors file")
-    parser.add_argument("--vae_path", default="MiniMaxAI/MiniMax-H3", help="Model repository")
-    parser.add_argument("--output", "-o", default="eval_artifact.bin", help="Output artifact path")
+    parser.add_argument("--vae_path", default="./minimax_h3_video_vae_fp16.safetensors", help="Model weights path")
+    parser.add_argument("--output", "-o", default="eval_artifact.mp4", help="Output artifact path")
     parser.add_argument("--metrics-out", default="benchmark_metrics.json", help="Path to export JSON benchmark metrics")
     parser.add_argument("--dtype", default="float32", choices=["float32", "bfloat16"], help="Precision")
-    parser.add_argument("--no-tile", action="store_true", default=True, help="Disable spatial tiling (default)")
-    parser.add_argument("--tile", action="store_true", help="Enable spatial tiling")
 
     args = parser.parse_args()
-    use_tile = args.tile and not args.no_tile
 
     run_benchmark(
         latent_path=args.latent_path,
@@ -346,7 +352,6 @@ def main():
         output_path=args.output,
         metrics_path=args.metrics_out,
         dtype=args.dtype,
-        tile=use_tile,
     )
 
 
