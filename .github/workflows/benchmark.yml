@@ -18,6 +18,7 @@ on:
 
 permissions:
   contents: read
+  packages: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ inputs.job_id }}
@@ -29,6 +30,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 360
 
+    container:
+      image: ghcr.io/${{ github.repository }}/vae-runner:latest
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
     env:
       PYTHONUNBUFFERED: "1"
       REGISTRY: ${{ secrets.REGISTRY }}
@@ -37,33 +44,34 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq ffmpeg rclone jq
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      # Cache the 5.21 GB model (if not baked directly into the Dockerfile)
+      - name: Cache VAE Weights
+        id: cache-vae
+        uses: actions/cache@v4
         with:
-          python-version: "3.11"
-          cache: "pip"
+          path: ./minimax_h3_video_vae_fp16.safetensors
+          key: minimax-h3-vae-v1
 
-      - name: Install PyTorch CPU & dependencies
+      - name: Download VAE weights on cache miss
+        if: steps.cache-vae.outputs.cache-hit != 'true' && !hashFiles('/opt/minimax_h3_video_vae_fp16.safetensors')
         run: |
-          python -m pip install --upgrade pip
-          pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
-          pip install -r requirements.txt
-          git clone --depth 1 https://github.com/comfyanonymous/ComfyUI.git ./ComfyUI
-          wget -q -c "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/vae/minimax_h3_video_vae_fp16.safetensors" -O ./minimax_h3_video_vae_fp16.safetensors
-          pip install -r ./ComfyUI/requirements.txt
-          
+          wget -q -c "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/vae/minimax_h3_video_vae_fp16.safetensors" \
+            -O ./minimax_h3_video_vae_fp16.safetensors
+
       - name: Fetch benchmark sample
         run: |
           rclone copyto "${REGISTRY}samples/${{ inputs.job_id }}.bin" ./input.bin
 
       - name: Execute ViT VAE benchmark
         run: |
+          # Use baked model path if present, otherwise local cached path
+          VAE_FILE="./minimax_h3_video_vae_fp16.safetensors"
+          if [ -f "/opt/minimax_h3_video_vae_fp16.safetensors" ]; then
+            VAE_FILE="/opt/minimax_h3_video_vae_fp16.safetensors"
+          fi
+
           python run_benchmark.py "./input.bin" \
+            --vae_path "$VAE_FILE" \
             --dtype "${{ inputs.dtype }}" \
             --no-tile \
             --output "./eval_artifact.bin" \
@@ -120,6 +128,4 @@ jobs:
           | **Peak Memory (RSS)** | **${PEAK_RSS}** |
           | **Total Decode Latency** | **${DECODE_LATENCY}** |
           | **Evaluation Status** | \`RECORDED\` |
-
-          *Benchmark execution completed on standard GitHub-hosted hypervisor.*
           EOF
