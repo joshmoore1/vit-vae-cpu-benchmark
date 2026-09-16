@@ -357,7 +357,12 @@ def main():
     parser.add_argument("--metrics-out", default="benchmark_metrics.json", help="Path to export JSON benchmark metrics")
     parser.add_argument("--dtype", default="float32", choices=["float32", "bfloat16"], help="Precision")
 
-    args = parser.parse_args()
+    # Add back the CLI flags that benchmark.yml passes:
+    parser.add_argument("--no-tile", action="store_true", help="Disable spatial tiling")
+    parser.add_argument("--tile", action="store_true", help="Enable spatial tiling")
+    parser.add_argument("--tile-size", nargs=2, type=int, default=None, help="Tile size (height, width)")
+
+    args, _ = parser.parse_known_args()
 
     run_benchmark(
         latent_path=args.latent_path,
