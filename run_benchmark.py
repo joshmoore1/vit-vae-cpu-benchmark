@@ -22,8 +22,21 @@ import psutil
 import torch
 import numpy as np
 
-# Add ComfyUI to module path
+# 1. Add ComfyUI to path
 sys.path.insert(0, os.path.abspath("./ComfyUI"))
+
+# 2. Tell ComfyUI to parse an empty arg list (ignoring sys.argv) and force CPU mode
+import comfy.options
+comfy.options.args_parsing = False
+
+import comfy.cli_args
+comfy.cli_args.args.cpu = True
+comfy.cli_args.args.cpu_vae = True
+
+# 3. Now import model_management and sd safely on CPU
+import comfy.model_management
+comfy.model_management.cpu_state = comfy.model_management.CPUState.CPU
+
 import comfy.utils
 import comfy.sd
 
