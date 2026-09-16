@@ -219,23 +219,21 @@ def run_benchmark(
     torch_dtype = torch.bfloat16 if dtype == "bfloat16" else torch.float32
     torch_device = torch.device("cpu")
 
-    # Load input latent tensor
-    latent_data = comfy.utils.load_torch_file(latent_path)
-    if isinstance(latent_data, dict):
-        latents = latent_data.get("latents", latent_data.get("video"))
-        audio = latent_data.get("audio")
-    else:
-        latents = latent_data
-        audio = None
+    from safetensors import safe_open
+    # Load input latent tensor directly via safe_open (supports .bin or .safetensors)
+    with safe_open(latent_path, framework="pt", device="cpu") as f:
+        meta = f.metadata() or {}
+        latents = f.get_tensor("latents")
+        audio = f.get_tensor("audio") if "audio" in f.keys() else None
 
     if latents.ndim == 4:
         latents = latents.unsqueeze(2)
 
-    height = latents.shape[-2] * 16
-    width = latents.shape[-1] * 16
-    fps = 24
-    sampling_rate = 24000
-    frames = (latents.shape[2] - 1) * 4 + 1 if latents.shape[2] > 1 else 1
+    height = int(meta.get("height", latents.shape[-2] * 16))
+    width = int(meta.get("width", latents.shape[-1] * 16))
+    fps = int(meta.get("fps", 24))
+    sampling_rate = int(meta.get("sampling_rate", 24000))
+    frames = int(meta.get("num_frames", (latents.shape[2] - 1) * 4 + 1 if latents.shape[2] > 1 else 1))
 
     print(f"[benchmark] Input Tensor Shape: {latents.shape} | Precision: {torch_dtype}", flush=True)
     print(f"[benchmark] Output Volume: {width}x{height} | Frames: {frames} @ {fps} fps", flush=True)
