@@ -44,34 +44,14 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # Cache the 5.21 GB model (if not baked directly into the Dockerfile)
-      - name: Cache VAE Weights
-        id: cache-vae
-        uses: actions/cache@v4
-        with:
-          path: ./minimax_h3_video_vae_fp16.safetensors
-          key: minimax-h3-vae-v1
-
-      - name: Download VAE weights on cache miss
-        if: steps.cache-vae.outputs.cache-hit != 'true' && !hashFiles('/opt/minimax_h3_video_vae_fp16.safetensors')
-        run: |
-          wget -q -c "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/vae/minimax_h3_video_vae_fp16.safetensors" \
-            -O ./minimax_h3_video_vae_fp16.safetensors
-
       - name: Fetch benchmark sample
         run: |
           rclone copyto "${REGISTRY}samples/${{ inputs.job_id }}.bin" ./input.bin
 
       - name: Execute ViT VAE benchmark
         run: |
-          # Use baked model path if present, otherwise local cached path
-          VAE_FILE="./minimax_h3_video_vae_fp16.safetensors"
-          if [ -f "/opt/minimax_h3_video_vae_fp16.safetensors" ]; then
-            VAE_FILE="/opt/minimax_h3_video_vae_fp16.safetensors"
-          fi
-
           python run_benchmark.py "./input.bin" \
-            --vae_path "$VAE_FILE" \
+            --vae_path "/opt/minimax_h3_video_vae_fp16.safetensors" \
             --dtype "${{ inputs.dtype }}" \
             --no-tile \
             --output "./eval_artifact.bin" \
