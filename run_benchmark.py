@@ -126,15 +126,18 @@ def get_cpu_capabilities() -> dict:
     try:
         with open("/proc/cpuinfo", "r") as f:
             for line in f:
-                if line.startswith("model name") and info["model"] == "Generic x86_64":
-                    info["model"] = line.split(":", 1).strip()
-                if line.startswith("flags"):
-                    flags = line.split(":", 1).strip().split()
+                if ":" not in line:
+                    continue
+                key, val = [x.strip() for x in line.split(":", 1)]
+                if key == "model name" and info["model"] == "Generic x86_64":
+                    info["model"] = val
+                elif key == "flags":
+                    flags = val.split()
                     info["avx2"] = "avx2" in flags
                     info["avx512"] = any(f.startswith("avx512") for f in flags)
                     info["fma"] = "fma" in flags
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[warning] CPU info parsing encountered an issue: {e}", flush=True)
     return info
 
 
