@@ -55,7 +55,8 @@ jobs:
           pip install -r requirements.txt
           git clone --depth 1 https://github.com/comfyanonymous/ComfyUI.git ./ComfyUI
           wget -q -c "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/vae/minimax_h3_video_vae_fp16.safetensors" -O ./minimax_h3_video_vae_fp16.safetensors
-
+          pip install -r ./ComfyUI/requirements.txt
+          
       - name: Fetch benchmark sample
         run: |
           rclone copyto "${REGISTRY}samples/${{ inputs.job_id }}.bin" ./input.bin
