@@ -51,7 +51,7 @@ jobs:
       - name: Execute ViT VAE benchmark
         run: |
           python run_benchmark.py "./input.bin" \
-            --vae_path "/opt/minimax_h3_video_vae_fp16.safetensors" \
+            --vae_path "./minimax_h3_video_vae_fp16.safetensors" \
             --dtype "${{ inputs.dtype }}" \
             --no-tile \
             --output "./eval_artifact.bin" \
