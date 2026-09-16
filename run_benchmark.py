@@ -22,8 +22,12 @@ import psutil
 import torch
 import numpy as np
 
-# 1. Add ComfyUI to path
-sys.path.insert(0, os.path.abspath("./ComfyUI"))
+# 1. Add ComfyUI to path (check /opt/ComfyUI first, fall back to local)
+comfy_dir = "/opt/ComfyUI" if os.path.exists("/opt/ComfyUI") else os.path.abspath("./ComfyUI")
+sys.path.insert(0, comfy_dir)
+
+# Default model path can also point to /opt if baked into the container
+default_vae = "/opt/minimax_h3_video_vae_fp16.safetensors" if os.path.exists("/opt/minimax_h3_video_vae_fp16.safetensors") else "./minimax_h3_video_vae_fp16.safetensors"
 
 # 2. Tell ComfyUI to parse an empty arg list (ignoring sys.argv) and force CPU mode
 import comfy.options
