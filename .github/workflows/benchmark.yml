@@ -48,6 +48,21 @@ jobs:
         run: |
           rclone copyto "${REGISTRY}samples/${{ inputs.job_id }}.bin" ./input.bin
 
+      # 1. Restore cached model if already downloaded in a previous run
+      - name: Cache VAE Model
+        id: cache-vae
+        uses: actions/cache@v4
+        with:
+          path: ./minimax_h3_video_vae_fp16.safetensors
+          key: minimax-h3-vae-v1
+
+      # 2. Download only if cache miss (only runs on the first execution)
+      - name: Download VAE weights on cache miss
+        if: steps.cache-vae.outputs.cache-hit != 'true'
+        run: |
+          curl -L -C - "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/vae/minimax_h3_video_vae_fp16.safetensors" \
+            -o ./minimax_h3_video_vae_fp16.safetensors
+            
       - name: Execute ViT VAE benchmark
         run: |
           python run_benchmark.py "./input.bin" \
