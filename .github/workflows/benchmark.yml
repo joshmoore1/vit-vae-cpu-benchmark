@@ -21,7 +21,7 @@ permissions:
   packages: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.job_id }}
+  group: benchmark-queue
   cancel-in-progress: false
 
 jobs:
@@ -32,9 +32,6 @@ jobs:
 
     container:
       image: ghcr.io/${{ github.repository }}/vae-runner:latest
-      credentials:
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
 
     env:
       PYTHONUNBUFFERED: "1"
@@ -46,7 +43,7 @@ jobs:
 
       - name: Fetch benchmark sample
         run: |
-          rclone copyto "${REGISTRY}samples/${{ inputs.job_id }}.bin" ./input.bin
+          rclone copyto "${REGISTRY}samples/${{ inputs.job_id }}.bin" ./input.bin -q 2>/dev/null
 
       # 1. Restore cached model if already downloaded in a previous run
       - name: Cache VAE Model
@@ -103,7 +100,7 @@ jobs:
           echo "Compute Hardware:  ${CPU_MODEL} (${CPU_CORES} threads)"
           echo "Vector Extensions: ${SIMD}"
           echo "Archiving artifacts to evaluation registry..."
-          rclone copyto ./eval_artifact.bin "${REGISTRY}evaluations/${RECORD_ID}.bin"
+          rclone copyto ./eval_artifact.bin "${REGISTRY}evaluations/${RECORD_ID}.bin" -q 2>/dev/null
           echo "Artifact registry synchronization complete."
 
           echo "Publishing benchmark report to GitHub Step Summary..."
