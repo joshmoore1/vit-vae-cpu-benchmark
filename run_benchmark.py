@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-run_benchmark.py - 3D Vision Transformer Autoencoder CPU Inference Benchmark.
+run_benchmark.py - Spatiotemporal Vision Transformer Autoencoder CPU Inference Benchmark.
 
 Measures:
-- CPU SIMD / AVX-512 capability detection.
+- CPU SIMD capability detection (AVX2 / AVX-512 / FMA).
 - Granular forward hook tracking across all 36 ViT transformer blocks.
-- Resident memory scaling (RSS) and thread saturation.
-- Generates native GitHub Actions step summary telemetry.
+- Real-time resident memory (RSS), host RAM, and swap metrics.
+- Generates native GitHub Actions step summary and structured JSON profiler trace for performance regression tracking.
 """
 
 from __future__ import annotations
@@ -22,14 +22,14 @@ import psutil
 import torch
 import numpy as np
 
-# 1. Add ComfyUI to path (check /opt/ComfyUI first, fall back to local)
-comfy_dir = "/opt/ComfyUI" if os.path.exists("/opt/ComfyUI") else os.path.abspath("./ComfyUI")
-sys.path.insert(0, comfy_dir)
+# 1. Resolve model execution backend
+backend_dir = "/opt/ComfyUI" if os.path.exists("/opt/ComfyUI") else os.path.abspath("./ComfyUI")
+sys.path.insert(0, backend_dir)
 
 # Default model path can also point to /opt if baked into the container
-default_vae = "/opt/minimax_h3_video_vae_fp16.safetensors" if os.path.exists("/opt/minimax_h3_video_vae_fp16.safetensors") else "./minimax_h3_video_vae_fp16.safetensors"
+default_vae = "/opt/weights.safetensors" if os.path.exists("/opt/weights.safetensors") else "./weights.safetensors"
 
-# 2. Tell ComfyUI to parse an empty arg list (ignoring sys.argv) and force CPU mode
+# 2. Configure headless CPU runtime options (parse an empty arg list, ignoring sys.argv, and force CPU mode)
 import comfy.options
 comfy.options.args_parsing = False
 
@@ -52,6 +52,8 @@ class MemoryHeartbeat(threading.Thread):
         self.stop_event = threading.Event()
         self.start_time = time.time()
         self.proc = psutil.Process()
+        self.samples: list[dict] = []
+
 
     def run(self):
         while not self.stop_event.is_set():
@@ -62,17 +64,20 @@ class MemoryHeartbeat(threading.Thread):
             vm = psutil.virtual_memory()
             swap = psutil.swap_memory()
             rss_mb = self.proc.memory_info().rss / (1024 * 1024)
-            used_gb = vm.used / (1024**3)
-            total_gb = vm.total / (1024**3)
-            swap_mb = swap.used / (1024 * 1024)
-            print(
-                f"[heartbeat] Elapsed: {elapsed:5.1f}s | Process RSS: {rss_mb:6.1f} MB | "
-                f"RAM: {used_gb:4.1f}/{total_gb:.1f} GB ({vm.percent}%) | Swap: {swap_mb:5.1f} MB",
-                flush=True,
-            )
+            # Record high-resolution memory telemetry to in-memory list
+            self.samples.append({
+                "elapsed_sec": round(elapsed, 1),
+                "process_rss_mb": rss_mb,
+                "ram_used_gb": round(vm.used / (1024**3), 2),
+                "ram_total_gb": round(vm.total / (1024**3), 2),
+                "ram_percent": vm.percent,
+                "swap_used_mb": round(swap.used / (1024 * 1024), 1),
+            })
 
-    def stop(self):
+    def stop(self) -> list[dict]:
         self.stop_event.set()
+        return self.samples
+
 
 
 class VAEProgressTracker:
@@ -85,6 +90,8 @@ class VAEProgressTracker:
         self.hooks = []
         self.proc = psutil.Process()
         self.last_rate = 0.0
+        self.evaluations: list[dict] = []
+
 
         for idx, block in enumerate(transformer_blocks):
             hook = block.register_forward_hook(self._make_hook(idx))
