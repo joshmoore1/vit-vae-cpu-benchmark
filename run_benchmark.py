@@ -41,6 +41,13 @@ comfy.cli_args.args.cpu_vae = True
 import comfy.model_management
 comfy.model_management.cpu_state = comfy.model_management.CPUState.CPU
 
+# Guard against torchaudio CUDA linkage errors on CPU-only containers
+try:
+    import torchaudio
+except (ImportError, OSError, Exception):
+    from unittest.mock import MagicMock
+    sys.modules["torchaudio"] = MagicMock()
+
 import comfy.utils
 import comfy.sd
 

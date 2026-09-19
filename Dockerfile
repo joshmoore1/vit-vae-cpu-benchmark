@@ -17,7 +17,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # 2. PyTorch CPU
 RUN pip install --no-cache-dir \
-    torch torchvision \
+    torch torchvision torchaudio \
     --index-url https://download.pytorch.org/whl/cpu
 
 # 3. Clone ComfyUI core
