@@ -45,8 +45,15 @@ comfy.model_management.cpu_state = comfy.model_management.CPUState.CPU
 try:
     import torchaudio
 except (ImportError, OSError, Exception):
-    from unittest.mock import MagicMock
-    sys.modules["torchaudio"] = MagicMock()
+    import types
+    import importlib.machinery
+    mod = types.ModuleType("torchaudio")
+    mod.__spec__ = importlib.machinery.ModuleSpec("torchaudio", None)
+    mod.__version__ = "2.2.0"
+    mod._extension = types.ModuleType("torchaudio._extension")
+    mod._extension._IS_TORCHAUDIO_EXT_AVAILABLE = False
+    sys.modules["torchaudio"] = mod
+    sys.modules["torchaudio._extension"] = mod._extension
 
 import comfy.utils
 import comfy.sd
