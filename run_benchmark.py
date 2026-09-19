@@ -224,10 +224,30 @@ def save_benchmark_metrics(
         print(f"[warning] Could not save benchmark metrics to {metrics_path}: {e}", flush=True)
 
 
+def calculate_expected_passes(width: int, height: int, num_latent_t: int, tile_size: int = 256, overlap: int = 64) -> int:
+    def get_axis_tiles(dim: int) -> int:
+        if dim <= tile_size:
+            return 1
+        if dim <= 768:
+            return 2
+        stride = tile_size - overlap
+        return max(1, (dim - overlap + stride - 1) // stride)
+
+    tiles_y = get_axis_tiles(height)
+    tiles_x = get_axis_tiles(width)
+    spatial_tiles = max(1, tiles_y * tiles_x)
+
+    if num_latent_t <= 5:
+        return spatial_tiles
+
+    temporal_passes = max(1, (num_latent_t - 2) // 5 + 1)
+    return spatial_tiles * temporal_passes
+
+
 def run_benchmark(
     latent_path: str,
     vae_path: str = "./minimax_h3_video_vae_fp16.safetensors",
-    output_path: str = "result.mp4",
+    output_path: str = "eval_artifact.bin",
     metrics_path: str = "benchmark_metrics.json",
     dtype: str = "float32",
 ):
@@ -272,7 +292,7 @@ def run_benchmark(
             blocks = list(m.transformer_blocks)
 
     num_latent_t = latents.shape[2]
-    expected_passes = 1 if num_latent_t <= 2 else (num_latent_t - 2)
+    expected_passes = calculate_expected_passes(width=width, height=height, num_latent_t=num_latent_t)
 
     # Tracker derives block count directly from blocks
     tracker = VAEProgressTracker(blocks, expected_passes=expected_passes)
