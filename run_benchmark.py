@@ -5,13 +5,14 @@ run_benchmark.py - Spatiotemporal Vision Transformer Autoencoder CPU Inference B
 Measures:
 - CPU SIMD capability detection (AVX2 / AVX-512 / FMA).
 - Granular forward hook tracking across all 36 ViT transformer blocks.
-- Real-time resident memory (RSS), host RAM, and swap metrics.
-- Generates native GitHub Actions step summary and structured JSON profiler trace for performance regression tracking.
+- Resident memory scaling (RSS) and thread saturation.
+- Generates native GitHub Actions step summary telemetry.
 """
 
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 import os
 import sys
@@ -52,8 +53,7 @@ class MemoryHeartbeat(threading.Thread):
         self.stop_event = threading.Event()
         self.start_time = time.time()
         self.proc = psutil.Process()
-        self.samples: list[dict] = []
-
+        self.samples = []
 
     def run(self):
         while not self.stop_event.is_set():
@@ -64,34 +64,35 @@ class MemoryHeartbeat(threading.Thread):
             vm = psutil.virtual_memory()
             swap = psutil.swap_memory()
             rss_mb = self.proc.memory_info().rss / (1024 * 1024)
-            # Record high-resolution memory telemetry to in-memory list
+            used_gb = vm.used / (1024**3)
+            total_gb = vm.total / (1024**3)
+            swap_mb = swap.used / (1024 * 1024)
             self.samples.append({
-                "elapsed_sec": round(elapsed, 1),
+                "elapsed_sec": elapsed,
                 "process_rss_mb": rss_mb,
-                "ram_used_gb": round(vm.used / (1024**3), 2),
-                "ram_total_gb": round(vm.total / (1024**3), 2),
+                "ram_used_gb": used_gb,
+                "ram_total_gb": total_gb,
                 "ram_percent": vm.percent,
-                "swap_used_mb": round(swap.used / (1024 * 1024), 1),
+                "swap_used_mb": swap_mb,
             })
 
-    def stop(self) -> list[dict]:
+    def stop(self):
         self.stop_event.set()
         return self.samples
 
 
-
 class VAEProgressTracker:
-    def __init__(self, transformer_blocks, num_blocks: int = 36, expected_tiles: int = 1):
-        self.num_blocks = num_blocks
-        self.expected_tiles = expected_tiles
-        self.total_expected_steps = num_blocks * expected_tiles
+    def __init__(self, transformer_blocks, expected_passes: int = 1):
+        # Derive block count directly from the passed module list
+        self.num_blocks = len(transformer_blocks) or 36
+        self.expected_passes = max(1, expected_passes)
+        self.total_expected_steps = self.num_blocks * self.expected_passes
         self.current_step = 0
         self.start_time = None
         self.hooks = []
         self.proc = psutil.Process()
         self.last_rate = 0.0
-        self.evaluations: list[dict] = []
-
+        self.evaluations = []
 
         for idx, block in enumerate(transformer_blocks):
             hook = block.register_forward_hook(self._make_hook(idx))
@@ -106,26 +107,37 @@ class VAEProgressTracker:
             rate = elapsed / self.current_step
             self.last_rate = rate
 
-            if self.current_step > self.total_expected_steps:
-                self.total_expected_steps = max(self.total_expected_steps + self.num_blocks, int(self.current_step * 1.05))
-
-            pct = min(100.0, (self.current_step / self.total_expected_steps) * 100.0)
-            eta_sec = max(0, (self.total_expected_steps - self.current_step) * rate)
-            eta_str = f"{int(eta_sec // 60)}m {int(eta_sec % 60):02d}s" if eta_sec > 0 else "finishing"
             rss_mb = self.proc.memory_info().rss / (1024 * 1024)
+            current_pass = min(self.expected_passes, (self.current_step + self.num_blocks - 1) // self.num_blocks)
 
-            print(
-                f"[BENCHMARK] Step {self.current_step:4d}/{self.total_expected_steps:4d} "
-                f"({pct:5.1f}%) | Block {block_idx+1:2d}/36 | "
-                f"Elapsed: {int(elapsed//60)}m {int(elapsed%60):02d}s | ETA: {eta_str} "
-                f"({rate:4.2f}s/block) | RSS: {rss_mb:.0f} MB",
-                flush=True,
-            )
+            self.evaluations.append({
+                "step": self.current_step,
+                "pass": current_pass,
+                "block": block_idx + 1,
+                "elapsed_sec": elapsed,
+                "layer_rate_sec": rate,
+                "rss_mb": rss_mb,
+            })
+
+            if (block_idx == self.num_blocks - 1) or (self.current_step == self.total_expected_steps):
+                pct = min(100.0, (self.current_step / self.total_expected_steps) * 100.0)
+                remaining_steps = max(0, self.total_expected_steps - self.current_step)
+                eta_sec = remaining_steps * rate
+                eta_str = f"{int(eta_sec // 60)}m {int(eta_sec % 60):02d}s" if remaining_steps > 0 else "finishing"
+
+                print(
+                    f"[BENCHMARK] Pass {current_pass:2d}/{self.expected_passes:2d} "
+                    f"({pct:5.1f}%) | Step {self.current_step:4d}/{self.total_expected_steps:4d} | "
+                    f"Elapsed: {int(elapsed//60)}m {int(elapsed%60):02d}s | ETA: {eta_str} "
+                    f"({rate:4.2f}s/block) | RSS: {rss_mb:.0f} MB",
+                    flush=True,
+                )
         return hook_fn
 
     def remove(self):
         for h in self.hooks:
             h.remove()
+        return self.evaluations
 
 
 def get_cpu_capabilities() -> dict:
@@ -173,7 +185,7 @@ def save_audio_resilient(audio: torch.Tensor, sampling_rate: int, output_wav: st
         if audio_np.ndim == 2:
             audio_np = audio_np.T
         int16_data = (np.clip(audio_np, -1.0, 1.0) * 32767).astype(np.int16)
-        nchannels = 1 if int16_data.ndim == 1 else int16_data.shape
+        nchannels = 1 if int16_data.ndim == 1 else int16_data.shape[0]
         with wave.open(output_wav, "wb") as wf:
             wf.setnchannels(nchannels)
             wf.setsampwidth(2)
@@ -188,26 +200,47 @@ def save_benchmark_metrics(
     metrics_path: str,
     width: int,
     height: int,
-    frames: int,
-    fps: int,
+    temporal_slices: int,
     dtype: str,
     decode_sec: float,
     rate: float,
     peak_rss: float,
+    cpu_info: dict,
+    total_steps: int,
+    total_passes: int,
+    heartbeats: list[dict],
+    block_evaluations: list[dict],
     sample_name: str = "benchmark_sample",
 ):
     data = {
-        "model": "MiniMax-H3 Video VAE",
-        "sample_name": sample_name,
-        "width": width,
-        "height": height,
-        "frames": frames,
-        "fps": fps,
-        "dtype": dtype,
-        "decode_duration_sec": round(decode_sec, 2),
-        "decode_duration_min": round(decode_sec / 60.0, 2),
-        "layer_rate_sec": round(rate, 2),
-        "peak_rss_mb": round(peak_rss, 1),
+        "benchmark_target": "Spatiotemporal AutoencoderKL",
+        "sample_id": sample_name,
+        "tensor_geometry": {
+            "channels": 3,
+            "temporal_slices": temporal_slices,
+            "height": height,
+            "width": width,
+            "shape_format": "C x T x H x W",
+        },
+        "execution": {
+            "precision": dtype,
+            "total_decode_sec": decode_sec,
+            "total_decode_min": decode_sec / 60.0,
+            "total_steps": total_steps,
+            "total_passes": total_passes,
+            "average_layer_rate_sec": rate,
+            "peak_rss_mb": peak_rss,
+        },
+        "hardware": {
+            "cpu_model": cpu_info.get("model", "Unknown"),
+            "logical_cores": cpu_info.get("cores", 4),
+            "pytorch_threads": torch.get_num_threads(),
+            "avx2": cpu_info.get("avx2", False),
+            "avx512": cpu_info.get("avx512", False),
+            "fma": cpu_info.get("fma", False),
+        },
+        "heartbeats": heartbeats,
+        "block_evaluations": block_evaluations,
     }
     try:
         with open(metrics_path, "w") as f:
@@ -223,7 +256,6 @@ def run_benchmark(
     output_path: str = "result.mp4",
     metrics_path: str = "benchmark_metrics.json",
     dtype: str = "float32",
-    tile: bool = False,
 ):
     cpu_info = get_cpu_capabilities()
     num_cpus = os.cpu_count() or 4
@@ -247,10 +279,10 @@ def run_benchmark(
     width = int(meta.get("width", latents.shape[-1] * 16))
     fps = int(meta.get("fps", 24))
     sampling_rate = int(meta.get("sampling_rate", 24000))
-    frames = int(meta.get("num_frames", (latents.shape[2] - 1) * 4 + 1 if latents.shape[2] > 1 else 1))
+    target_slices = int(meta.get("num_frames", (latents.shape - 1) * 4 + 1 if latents.shape > 1 else 1))
 
     print(f"[benchmark] Input Tensor Shape: {latents.shape} | Precision: {torch_dtype}", flush=True)
-    print(f"[benchmark] Output Volume: {width}x{height} | Frames: {frames} @ {fps} fps", flush=True)
+    print(f"[benchmark] Output Volume: {width}x{height} | Slices: {target_slices}", flush=True)
 
     # Load VAE weights
     print(f"[benchmark] Loading ViT Autoencoder weights from {vae_path} ...", flush=True)
@@ -268,23 +300,27 @@ def run_benchmark(
         elif hasattr(m, "transformer_blocks"):
             blocks = list(m.transformer_blocks)
 
-    num_latent_t = latents.shape[2]
-    expected_temporal_chunks = 1 if num_latent_t <= 5 else (2 if num_latent_t <= 22 else max(1, round((num_latent_t - 2) / 5.0) + 1))
-    expected_total_tiles = 1 * expected_temporal_chunks
+    num_latent_t = latents.shape
+    expected_passes = 1 if num_latent_t <= 2 else (num_latent_t - 2)
 
-    tracker = VAEProgressTracker(blocks, num_blocks=len(blocks) or 36, expected_tiles=expected_total_tiles)
+    # Tracker derives block count directly from blocks
+    tracker = VAEProgressTracker(blocks, expected_passes=expected_passes)
     heartbeat = MemoryHeartbeat(interval_sec=30.0)
     heartbeat.start()
 
-    print(f"[benchmark] Starting evaluation: {len(blocks) or 36} blocks x {expected_total_tiles} passes = ~{tracker.total_expected_steps} layer evaluations", flush=True)
+    print(
+        f"[benchmark] Starting evaluation: {tracker.num_blocks} blocks x {tracker.expected_passes} passes = "
+        f"~{tracker.total_expected_steps} layer evaluations",
+        flush=True,
+    )
     t_decode = time.time()
 
     try:
         with torch.inference_mode():
             decoded = vae.decode(latents.to(torch_device))
     finally:
-        tracker.remove()
-        heartbeat.stop()
+        block_evaluations = tracker.remove()
+        heartbeat_samples = heartbeat.stop()
 
     decode_duration = time.time() - t_decode
     proc = psutil.Process()
@@ -343,6 +379,10 @@ def run_benchmark(
     if p.returncode != 0:
         print(f"[ffmpeg-error] {err.decode('utf-8', errors='ignore')}", flush=True)
 
+    # Free high-memory array allocations before JSON serialization to eliminate OOM risk
+    del video_bytes, video_np, frames_np, decoded
+    gc.collect()
+
     print(f"[benchmark] Output artifact encoded to {output_path}", flush=True)
     print("=" * 65, flush=True)
 
@@ -350,12 +390,16 @@ def run_benchmark(
         metrics_path=metrics_path,
         width=width,
         height=height,
-        frames=frames,
-        fps=fps,
+        temporal_slices=target_slices,
         dtype=dtype,
         decode_sec=decode_duration,
         rate=tracker.last_rate,
         peak_rss=peak_rss_mb,
+        cpu_info=cpu_info,
+        total_steps=tracker.total_expected_steps,
+        total_passes=tracker.expected_passes,
+        heartbeats=heartbeat_samples,
+        block_evaluations=block_evaluations,
         sample_name=os.path.basename(latent_path),
     )
     return output_path
@@ -365,14 +409,9 @@ def main():
     parser = argparse.ArgumentParser(description="PyTorch ViT Video VAE CPU Benchmark")
     parser.add_argument("latent_path", help="Path to input tensor safetensors file")
     parser.add_argument("--vae_path", default="./minimax_h3_video_vae_fp16.safetensors", help="Model weights path")
-    parser.add_argument("--output", "-o", default="eval_artifact.mp4", help="Output artifact path")
+    parser.add_argument("--output", "-o", default="eval_artifact.bin", help="Output artifact path")
     parser.add_argument("--metrics-out", default="benchmark_metrics.json", help="Path to export JSON benchmark metrics")
     parser.add_argument("--dtype", default="float32", choices=["float32", "bfloat16"], help="Precision")
-
-    # Add back the CLI flags that benchmark.yml passes:
-    parser.add_argument("--no-tile", action="store_true", help="Disable spatial tiling")
-    parser.add_argument("--tile", action="store_true", help="Enable spatial tiling")
-    parser.add_argument("--tile-size", nargs=2, type=int, default=None, help="Tile size (height, width)")
 
     args, _ = parser.parse_known_args()
 
