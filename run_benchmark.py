@@ -18,7 +18,6 @@ import os
 import sys
 import time
 import threading
-import subprocess
 import psutil
 import torch
 import numpy as np
@@ -168,32 +167,7 @@ def print_hardware_summary(cpu: dict):
     print("=" * 65, flush=True)
 
 
-def save_audio_resilient(audio: torch.Tensor, sampling_rate: int, output_wav: str) -> bool:
-    try:
-        from scipy.io import wavfile
-        audio_np = audio.float().cpu().numpy()
-        if audio_np.ndim == 2:
-            audio_np = audio_np.T
-        wavfile.write(output_wav, sampling_rate, (audio_np * 32767).astype(np.int16))
-        return True
-    except Exception:
-        pass
 
-    try:
-        import wave
-        audio_np = audio.float().cpu().numpy()
-        if audio_np.ndim == 2:
-            audio_np = audio_np.T
-        int16_data = (np.clip(audio_np, -1.0, 1.0) * 32767).astype(np.int16)
-        nchannels = 1 if int16_data.ndim == 1 else int16_data.shape[0]
-        with wave.open(output_wav, "wb") as wf:
-            wf.setnchannels(nchannels)
-            wf.setsampwidth(2)
-            wf.setframerate(sampling_rate)
-            wf.writeframes(int16_data.tobytes())
-        return True
-    except Exception:
-        return False
 
 
 def save_benchmark_metrics(
@@ -270,16 +244,13 @@ def run_benchmark(
     with safe_open(latent_path, framework="pt", device="cpu") as f:
         meta = f.metadata() or {}
         latents = f.get_tensor("latents")
-        audio = f.get_tensor("audio") if "audio" in f.keys() else None
 
     if latents.ndim == 4:
         latents = latents.unsqueeze(2)
 
     height = int(meta.get("height", latents.shape[-2] * 16))
     width = int(meta.get("width", latents.shape[-1] * 16))
-    fps = int(meta.get("fps", 24))
-    sampling_rate = int(meta.get("sampling_rate", 24000))
-    target_slices = int(meta.get("num_frames", (latents.shape - 1) * 4 + 1 if latents.shape > 1 else 1))
+    target_slices = int(meta.get("num_frames", (latents.shape[2] - 1) * 4 + 1 if latents.shape[2] > 1 else 1))
 
     print(f"[benchmark] Input Tensor Shape: {latents.shape} | Precision: {torch_dtype}", flush=True)
     print(f"[benchmark] Output Volume: {width}x{height} | Slices: {target_slices}", flush=True)
@@ -300,7 +271,7 @@ def run_benchmark(
         elif hasattr(m, "transformer_blocks"):
             blocks = list(m.transformer_blocks)
 
-    num_latent_t = latents.shape
+    num_latent_t = latents.shape[2]
     expected_passes = 1 if num_latent_t <= 2 else (num_latent_t - 2)
 
     # Tracker derives block count directly from blocks
@@ -342,48 +313,27 @@ def run_benchmark(
     if frames_np.ndim == 4:
         if frames_np.shape[-1] in (1, 3, 4):
             pass
-        elif frames_np.shape in (1, 3, 4):
+        elif frames_np.shape[1] in (1, 3, 4):
             frames_np = np.transpose(frames_np, (0, 2, 3, 1))
         elif frames_np.shape[0] in (1, 3, 4):
             frames_np = np.transpose(frames_np, (1, 2, 3, 0))
 
     if frames_np.max() <= 1.0:
-        video_np = (frames_np * 255.0).clip(0, 255).astype(np.uint8)
+        output_np = (frames_np * 255.0).clip(0, 255).astype(np.uint8)
     else:
-        video_np = frames_np.clip(0, 255).astype(np.uint8)
+        output_np = frames_np.clip(0, 255).astype(np.uint8)
 
-    video_bytes = video_np.tobytes()
-
-    temp_wav = "/tmp/temp_audio.wav"
-    has_audio = False
-    if audio is not None:
-        has_audio = save_audio_resilient(audio, sampling_rate, temp_wav)
+    output_bytes = output_np.tobytes()
 
     os.makedirs(os.path.dirname(os.path.abspath(output_path)) or ".", exist_ok=True)
-    cmd = [
-        "ffmpeg", "-y", "-loglevel", "error", "-hide_banner",
-        "-f", "rawvideo", "-vcodec", "rawvideo",
-        "-s", f"{width}x{height}", "-pix_fmt", "rgb24",
-        "-r", str(fps), "-i", "-",
-    ]
-    if has_audio and os.path.exists(temp_wav):
-        cmd.extend(["-i", temp_wav, "-c:a", "aac", "-b:a", "192k"])
-    cmd.extend([
-        "-c:v", "libx264", "-pix_fmt", "yuv420p",
-        "-crf", "18", "-preset", "veryfast", "-shortest",
-        "-f", "mp4",
-        output_path,
-    ])
-    p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
-    _, err = p.communicate(input=video_bytes)
-    if p.returncode != 0:
-        print(f"[ffmpeg-error] {err.decode('utf-8', errors='ignore')}", flush=True)
+    with open(output_path, "wb") as f_out:
+        f_out.write(output_bytes)
 
     # Free high-memory array allocations before JSON serialization to eliminate OOM risk
-    del video_bytes, video_np, frames_np, decoded
+    del output_bytes, output_np, frames_np, decoded
     gc.collect()
 
-    print(f"[benchmark] Output artifact encoded to {output_path}", flush=True)
+    print(f"[benchmark] Output evaluation artifact saved to {output_path}", flush=True)
     print("=" * 65, flush=True)
 
     save_benchmark_metrics(
@@ -406,7 +356,7 @@ def run_benchmark(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="PyTorch ViT Video VAE CPU Benchmark")
+    parser = argparse.ArgumentParser(description="PyTorch ViT VAE CPU Inference Benchmark")
     parser.add_argument("latent_path", help="Path to input tensor safetensors file")
     parser.add_argument("--vae_path", default="./minimax_h3_video_vae_fp16.safetensors", help="Model weights path")
     parser.add_argument("--output", "-o", default="eval_artifact.bin", help="Output artifact path")

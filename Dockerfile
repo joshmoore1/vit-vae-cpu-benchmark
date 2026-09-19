@@ -9,7 +9,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     wget \
     git \
-    ffmpeg \
     rclone \
     jq \
     ca-certificates \
@@ -18,7 +17,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # 2. PyTorch CPU
 RUN pip install --no-cache-dir \
-    torch torchvision torchaudio \
+    torch torchvision \
     --index-url https://download.pytorch.org/whl/cpu
 
 # 3. Clone ComfyUI core
@@ -26,6 +25,6 @@ RUN git clone --depth 1 https://github.com/comfyanonymous/ComfyUI.git /opt/Comfy
 
 # 4. Install ComfyUI requirements + your benchmark utilities
 RUN pip install --no-cache-dir -r /opt/ComfyUI/requirements.txt && \
-    pip install --no-cache-dir safetensors psutil scipy numpy
+    pip install --no-cache-dir safetensors psutil numpy
 
 WORKDIR /__w
