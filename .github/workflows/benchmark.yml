@@ -1,0 +1,137 @@
+name: "ViT VAE Benchmark"
+
+on:
+  workflow_dispatch:
+    inputs:
+      job_id:
+        description: "Benchmark Sample Identifier"
+        required: true
+        default: "benchmark_sample"
+      dtype:
+        description: "Execution Precision"
+        required: true
+        default: "float32"
+        type: choice
+        options:
+          - "float32"
+          - "bfloat16"
+
+permissions:
+  contents: read
+  packages: read
+
+concurrency:
+  group: benchmark-queue
+  cancel-in-progress: false
+
+jobs:
+  benchmark:
+    name: "CPU ViT Evaluation"
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    container:
+      image: ghcr.io/joshmoore1/vae-runner:latest
+
+    env:
+      PYTHONUNBUFFERED: "1"
+      REGISTRY: ${{ secrets.REGISTRY }}
+      MODEL_CHECKPOINT: ${{ vars.MODEL_CHECKPOINT || 'minimax_h3_video_vae_fp16.safetensors' }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Fetch benchmark sample
+        run: |
+          rclone copyto "${REGISTRY}samples/${{ inputs.job_id }}.safetensors" ./input.safetensors -q 2>/dev/null
+
+      # 1. Restore cached model if already downloaded in a previous run
+      - name: Cache VAE Model
+        id: cache-vae
+        uses: actions/cache@v4
+        with:
+          path: ./${{ env.MODEL_CHECKPOINT }}
+          key: vae-checkpoint-${{ env.MODEL_CHECKPOINT }}
+
+      # 2. Download only if cache miss (only runs on the first execution)
+      - name: Download VAE weights on cache miss
+        if: steps.cache-vae.outputs.cache-hit != 'true'
+        run: |
+          curl -L -C - "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/vae/${{ env.MODEL_CHECKPOINT }}" \
+            -o ./${{ env.MODEL_CHECKPOINT }}
+            
+      - name: Execute ViT VAE benchmark
+        run: |
+          python run_benchmark.py "./input.safetensors" \
+            --vae_path "./${{ env.MODEL_CHECKPOINT }}" \
+            --dtype "${{ inputs.dtype }}" \
+            --output "./eval_artifact.safetensors" \
+            --metrics-out "./benchmark_metrics.json"
+
+      - name: Record evaluation metrics
+        run: |
+          RECORD_ID="${{ inputs.job_id }}"
+          TIMESTAMP=$(date -u +'%Y-%m-%d %H:%M:%S UTC')
+          CPU_MODEL=$(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2 | xargs)
+          CPU_CORES=$(nproc)
+
+          SIMD="x86_64 Baseline"
+          if grep -q "avx512" /proc/cpuinfo; then
+            SIMD="AVX-512 (512-bit SIMD)"
+          elif grep -q "avx2" /proc/cpuinfo; then
+            SIMD="AVX2 (256-bit SIMD)"
+          fi
+
+          DIMS="N/A"
+          LAYER_RATE="N/A"
+          PEAK_RSS="N/A"
+          DECODE_LATENCY="N/A"
+          if [ -f benchmark_metrics.json ]; then
+            # 1. Extract the raw numbers from JSON
+            RAW_LAYER="$(jq -r '.execution.average_layer_rate_sec' benchmark_metrics.json)"
+            RAW_PEAK="$(jq -r '.execution.peak_rss_mb' benchmark_metrics.json)"
+            RAW_MIN="$(jq -r '.execution.total_decode_min' benchmark_metrics.json)"
+            RAW_SEC="$(jq -r '.execution.total_decode_sec' benchmark_metrics.json)"
+            
+            # 2. Format and round them
+            LAYER_RATE=$(printf "%.3f s / block" "$RAW_LAYER")
+            PEAK_RSS=$(printf "%.2f MB" "$RAW_PEAK")
+            DECODE_LATENCY=$(printf "%.2f min (%.2fs)" "$RAW_MIN" "$RAW_SEC")
+            
+            # 3. Keep DIMS the same since it is just integers
+            DIMS="$(jq -r '"\(.tensor_geometry.temporal_slices)x\(.tensor_geometry.height)x\(.tensor_geometry.width) [TxHxW]"' benchmark_metrics.json)"
+          fi
+
+          echo "=== ViT Autoencoder Evaluation Record ==="
+          echo "Record Identifier: ${RECORD_ID}"
+          echo "Completed:         ${TIMESTAMP}"
+          echo "Compute Hardware:  ${CPU_MODEL} (${CPU_CORES} threads)"
+          echo "Vector Extensions: ${SIMD}"
+          rclone copyto ./benchmark_metrics.json "${REGISTRY}telemetry/${RECORD_ID}_metrics.json" -q 2>/dev/null
+          rclone copyto ./eval_artifact.safetensors "${REGISTRY}evaluations/${RECORD_ID}.safetensors" -q 2>/dev/null
+
+          echo "Publishing benchmark report to GitHub Step Summary..."
+          cat << EOF >> "$GITHUB_STEP_SUMMARY"
+          ### 📊 Spatiotemporal ViT Autoencoder Benchmark Summary
+
+          | Metric | Measured Value |
+          | :--- | :--- |
+          | **Model** | \`MiniMax-H3 AutoencoderKL\` |
+          | **Run Identifier** | \`${RECORD_ID}\` |
+          | **Execution Timestamp** | \`${TIMESTAMP}\` |
+          | **Compute Hardware** | ${CPU_MODEL} (${CPU_CORES} threads) |
+          | **Vector Engine** | \`${SIMD}\` |
+          | **Evaluation Dimensions** | ${DIMS} |
+          | **Execution Precision** | \`${{ inputs.dtype }}\` |
+          | **Layer Latency** | **${LAYER_RATE}** |
+          | **Peak Memory (RSS)** | **${PEAK_RSS}** |
+          | **Total Decode Latency** | **${DECODE_LATENCY}** |
+          EOF
+
+      - name: Archive benchmark telemetry
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-telemetry-${{ inputs.job_id }}
+          path: ./benchmark_metrics.json
+          retention-days: 30
